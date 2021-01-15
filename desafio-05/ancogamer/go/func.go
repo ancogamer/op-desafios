@@ -1,19 +1,27 @@
 package main
 
 import (
+	"bytes"
+	"flag"
+	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
+	"unsafe"
+)
 
-	jsoniter "github.com/json-iterator/go"
+const (
+	// numberOfBlocksDefault is the default number of concurrent blocks the JSON
+	// input file will be broken into for processing.
+	numberOfBlocksDefault = 16
 )
 
 // Area  struct da area, carregando campos extras para serem utilizados durante os calculos ..
 type Area struct {
-	Codigo             string `json:"codigo"`
-	Nome               string `json:"nome"`
+	Codigo             []byte `json:"codigo"`
+	Nome               []byte `json:"nome"`
 	QTD                int
 	AvgSal             float64
 	MaxSal             float64
@@ -26,11 +34,10 @@ type Area struct {
 
 // Employee = funcionario ..
 type Employee struct {
-	ID                          int     `json:"id"`
-	Nome                        string  `json:"nome"`
-	Sobrenome                   string  `json:"sobrenome"`
+	Nome                        []byte  `json:"nome"`
+	Sobrenome                   []byte  `json:"sobrenome"`
 	Salario                     float64 `json:"salario"`
-	Area                        string  `json:"area"`
+	Area                        []byte  `json:"area"`
 	GlobalMaxSalEmployeePointer *Employee
 	GlobalMinSalEmployeePointer *Employee
 	AreaMaxSalEmployeePointer   *Employee
@@ -77,57 +84,210 @@ type lastNameSal map[string][]*Employee
 	o próximo João Vitor informado é desconsiderado.
 */
 func maxSalByLastName(bigSalaryByLastName *lastNameSal, dat JSON, count int) {
-	sliceEmployee, found := (*bigSalaryByLastName)[dat.EmployeesPointer[count].Sobrenome]
+	sliceEmployee, found := (*bigSalaryByLastName)[string(dat.EmployeesPointer[count].Sobrenome)]
 	if found {
 		for _, value := range sliceEmployee {
 			if dat.EmployeesPointer[count].Salario == value.Salario {
-				if value.Nome == dat.EmployeesPointer[count].Nome {
+				if string(value.Nome) == string(dat.EmployeesPointer[count].Nome) {
 					return
 				}
-				(*bigSalaryByLastName)[dat.EmployeesPointer[count].Sobrenome] =
-					append((*bigSalaryByLastName)[dat.EmployeesPointer[count].Sobrenome], &dat.EmployeesPointer[count])
+				(*bigSalaryByLastName)[string(dat.EmployeesPointer[count].Sobrenome)] =
+					append((*bigSalaryByLastName)[string(dat.EmployeesPointer[count].Sobrenome)], &dat.EmployeesPointer[count])
 				return
 			}
 			if dat.EmployeesPointer[count].Salario > value.Salario {
-				if value.Nome == dat.EmployeesPointer[count].Nome {
+				if string(value.Nome) == string(dat.EmployeesPointer[count].Nome) {
 					return
 				}
-				(*bigSalaryByLastName)[dat.EmployeesPointer[count].Sobrenome] = ([]*Employee{&dat.EmployeesPointer[count]})
+				(*bigSalaryByLastName)[string(dat.EmployeesPointer[count].Sobrenome)] = ([]*Employee{&dat.EmployeesPointer[count]})
 				return
 			}
 		}
 		return
 	}
-	(*bigSalaryByLastName)[dat.EmployeesPointer[count].Sobrenome] = []*Employee{&dat.EmployeesPointer[count]}
+	(*bigSalaryByLastName)[string(dat.EmployeesPointer[count].Sobrenome)] = []*Employee{&dat.EmployeesPointer[count]}
 	return
 }
 
-func main() {
-	/*
-		var optCPUProfile string
-		flag.StringVar(&optCPUProfile, "cpuprofile", "", "write cpu profile to file")
-		flag.Parse()
-		if optCPUProfile != "" {
-			f, err := os.Create(optCPUProfile)
-			if err != nil {
-				panic(err)
-			}
-			pprof.StartCPUProfile(f)
-			defer pprof.StopCPUProfile()
+// baseado nesta solução https://github.com/OsProgramadores/op-desafios/blob/master/desafio-05/qrwteyrutiyoup/go/d05.go
+//=============================================================================================================
+
+// parseArea parses an area from the input JSON file.
+func (d *JSON) parseArea(data []byte) {
+	totalQuotes := 0
+	var current uint32
+	var previous uint32
+	a := Area{}
+	doublequote := byte('"')
+	i := uint32(0)
+	var idx int
+	for {
+		if idx = bytes.IndexByte(data[i:], doublequote); idx == -1 {
+			break
 		}
 
-		rawdata, err := ioutil.ReadFile(os.Args[len(os.Args)-1])
-	*/
+		totalQuotes++
+		previous = current
+		current = i + uint32(idx)
+		i = current + 1
+
+		switch totalQuotes {
+		// {"codigo":"SM", "nome":"Gerenciamento de Software"}
+		case 4:
+			a.Codigo = make([]byte, current-previous-1)
+			copy(a.Codigo, data[previous+1:current])
+		case 8:
+			a.Nome = make([]byte, current-previous-1)
+			copy(a.Nome, data[previous+1:current])
+			d.AreasPointer = append(d.AreasPointer, a)
+			return
+		}
+	}
+}
+
+// WARNING: DO NOT DO THIS AT HOME.
+func unsafeString(b []byte) string {
+	return *(*string)(unsafe.Pointer(&b))
+}
+
+// parseEmployee parses an employee from the input JSON file. If the received
+// data is not an employee, it calls parseArea instead.
+func (d *JSON) parseEmployee(data []byte, start, end uint32) {
+	totalQuotes := 0
+	var current uint32
+	var previous uint32
+
+	e := Employee{}
+
+	for i := start; i < end; i++ {
+		if data[i] != '"' {
+			continue
+		}
+		totalQuotes++
+		previous = current
+		current = i
+
+		switch totalQuotes {
+		// {"id":1,"nome":"Aahron","sobrenome":"Abaine","salario":68379.29,"area":"PI"}
+		case 2:
+			// Checking if it is an employee.
+			if !bytes.Equal([]byte("id"), data[previous+1:current]) {
+				d.parseArea(data[start : end+1])
+				return
+			}
+		case 6:
+			e.Nome = make([]byte, current-previous-1)
+			copy(e.Nome, data[previous+1:current])
+		case 10:
+			e.Sobrenome = make([]byte, current-previous-1)
+			copy(e.Sobrenome, data[previous+1:current])
+		case 13:
+			j := current - 2
+			for ; j > previous; j-- {
+				if data[j] >= '0' && data[j] <= '9' {
+					break
+				}
+			}
+			salary, err := strconv.ParseFloat(unsafeString(data[previous+2:j+1]), 64)
+			if err != nil {
+				log.Printf("oops: error converting %q to float: %v\n", data[previous+2:j+1], err)
+			}
+			e.Salario = salary
+		case 16:
+			e.Area = make([]byte, current-previous-1)
+			copy(e.Area, data[previous+1:current])
+			d.EmployeesPointer = append(d.EmployeesPointer, e)
+			return
+		}
+	}
+}
+
+// parseJSONBlock parses a block of JSON data from the input file. This method
+// will be run concurrently and generate a partial solution from the data it
+// processes, then send the result via the `block' channel.
+func (d *JSON) parseJSONBlock(data []byte, block chan *JSON) {
+	var start uint32
+
+	partialSolution := &JSON{}
+
+	openbracket := byte('{')
+	closedbracket := byte('}')
+	i := uint32(0)
+	var idx int
+	for {
+		if idx = bytes.IndexByte(data[i:], openbracket); idx == -1 {
+			break
+		}
+		start = i + uint32(idx)
+		i = start
+
+		if idx = bytes.IndexByte(data[i:], closedbracket); idx == -1 {
+			break
+		}
+		i += uint32(idx)
+		partialSolution.parseEmployee(data, start, i)
+		i++
+
+	}
+
+	block <- partialSolution
+}
+
+// parseJSON receives the full JSON data from the input file and calls
+// `parseJSONBlocks' to process the smaller blocks. It returns the global
+// solution for the problem at hand, once the partial solutions have all been
+// accounted for.
+func parseJSON(data []byte, blocksToUse uint32) *JSON {
+	solution := &JSON{}
+	block := make(chan *JSON)
+	wg := sync.WaitGroup{}
+
+	// An average step to form the blocks.
+	step := uint32(len(data)) / blocksToUse
+
+	size := uint32(len(data))
+	i := step
+	start := uint32(1)
+	bracket := byte('{')
+	var idx int
+	for p := uint32(0); p < blocksToUse-1; p++ {
+		for i < size {
+			if idx = bytes.IndexByte(data[i:], bracket); idx == -1 {
+				break
+			}
+
+			wg.Add(1)
+			i += uint32(idx)
+			go solution.parseJSONBlock(data[start:i-1], block)
+			start = i
+			i += step
+			break
+		}
+	}
+	// Last block.
+
+	go solution.parseJSONBlock(data[start:], block)
+
+	return solution
+}
+
+//==================================================================================================
+func main() {
 	rawdata, err := ioutil.ReadFile(os.Args[1])
 	if err != nil {
 		panic(err)
 	}
 
-	dat := JSON{}
-	json := jsoniter.ConfigFastest
-	if err = json.Unmarshal(rawdata, &dat); err != nil {
-		panic(err)
+	numberOfBlocks := uint32(numberOfBlocksDefault)
+	if len(os.Args) >= 3 {
+		n, err := strconv.ParseUint(flag.Args()[1], 10, 32)
+		if err != nil {
+			log.Fatal(err)
+		}
+		numberOfBlocks = uint32(n)
 	}
+
+	dat := parseJSON(rawdata, numberOfBlocks)
 
 	var sizeArea int = len(dat.AreasPointer)
 
@@ -138,12 +298,12 @@ func main() {
 	bigSalaryByLastName := lastNameSal{}
 
 	mostArea := MostAreaQtd{}
-	leastArea := LeastAreaQtd{}
+	//	leastArea := LeastAreaQtd{}
 
 	var count int
 	for count = 0; count < len(dat.EmployeesPointer); count++ {
 		// calculo maior salario por sobrenome
-		maxSalByLastName(&bigSalaryByLastName, dat, count)
+		maxSalByLastName(&bigSalaryByLastName, *dat, count)
 
 		// calculo global_max
 		if dat.EmployeesPointer[count].Salario > globalMaxSal.Salario {
@@ -181,7 +341,7 @@ func main() {
 		mediaGlobalSal += dat.EmployeesPointer[count].Salario
 
 		for areaCount := 0; areaCount < sizeArea; areaCount++ {
-			if dat.EmployeesPointer[count].Area == dat.AreasPointer[areaCount].Codigo {
+			if string(dat.EmployeesPointer[count].Area) == string(dat.AreasPointer[areaCount].Codigo) {
 				// calculo menor salario
 				if dat.AreasPointer[areaCount].QTD == 0 {
 					dat.AreasPointer[areaCount].MinSal = dat.EmployeesPointer[count].Salario
@@ -237,248 +397,250 @@ func main() {
 			}
 		}
 	}
+	fmt.Println(dat)
+	/*
+		wg := sync.WaitGroup{}
+		wg.Add(8)
 
-	wg := sync.WaitGroup{}
-	wg.Add(8)
+		leastArea.QTD = mostArea.QTD
 
-	leastArea.QTD = mostArea.QTD
+		// exibindo global_avg
 
-	// exibindo global_avg
+		os.Stdout.WriteString("global_avg|")
+		os.Stdout.WriteString(strconv.FormatFloat(mediaGlobalSal/float64(count), 'f', 2, 64))
 
-	os.Stdout.WriteString("global_avg|")
-	os.Stdout.WriteString(strconv.FormatFloat(mediaGlobalSal/float64(count), 'f', 2, 64))
-
-	// area avg
-	// area_avg|<nome da área>|<salário médio>
-	go func() {
-		var sb strings.Builder
-		for contador := 0; contador < sizeArea; contador++ {
-			if dat.AreasPointer[contador].QTD != 0 {
-				sb.WriteString("\narea_avg|")
-				sb.WriteString(dat.AreasPointer[contador].Nome)
-				sb.WriteString("|")
-				sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AvgSal/float64(dat.AreasPointer[contador].QTD), 'f', 2, 64))
+		// area avg
+		// area_avg|<nome da área>|<salário médio>
+		go func() {
+			var sb strings.Builder
+			for contador := 0; contador < sizeArea; contador++ {
+				if dat.AreasPointer[contador].QTD != 0 {
+					sb.WriteString("\narea_avg|")
+					sb.Write(dat.AreasPointer[contador].Nome)
+					sb.WriteString("|")
+					sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AvgSal/float64(dat.AreasPointer[contador].QTD), 'f', 2, 64))
+				}
 			}
-		}
-		// exibindo o area_avg
-		os.Stdout.WriteString(sb.String())
+			// exibindo o area_avg
+			os.Stdout.WriteString(sb.String())
 
-		wg.Done()
-	}()
+			wg.Done()
+		}()
 
-	// glogal_max
-	// global_max|<Nome Completo>|<Salário>
-	go func() {
-		// construindo a string
-		var sb strings.Builder
-		sb.WriteString("\nglobal_max|")
-		sb.WriteString(globalMaxSal.EmployeePointer.Nome)
-		sb.WriteString(" ")
-		sb.WriteString(globalMaxSal.EmployeePointer.Sobrenome)
-		sb.WriteString("|")
-		sb.WriteString(strconv.FormatFloat(globalMaxSal.EmployeePointer.Salario, 'f', 2, 64))
-		for globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer != nil {
+		// glogal_max
+		// global_max|<Nome Completo>|<Salário>
+		go func() {
+			// construindo a string
+			var sb strings.Builder
 			sb.WriteString("\nglobal_max|")
-			sb.WriteString(globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.Nome)
+			sb.Write(globalMaxSal.EmployeePointer.Nome)
 			sb.WriteString(" ")
-			sb.WriteString(globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.Sobrenome)
+			sb.Write(globalMaxSal.EmployeePointer.Sobrenome)
 			sb.WriteString("|")
-			sb.WriteString(strconv.FormatFloat(globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.Salario, 'f', 2, 64))
-			globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer =
-				globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.GlobalMaxSalEmployeePointer
-		}
-		// exibindo
-		os.Stdout.WriteString(sb.String())
+			sb.WriteString(strconv.FormatFloat(globalMaxSal.EmployeePointer.Salario, 'f', 2, 64))
+			for globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer != nil {
+				sb.WriteString("\nglobal_max|")
+				sb.Write(globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.Nome)
+				sb.WriteString(" ")
+				sb.Write(globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.Sobrenome)
+				sb.WriteString("|")
+				sb.WriteString(strconv.FormatFloat(globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.Salario, 'f', 2, 64))
+				globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer =
+					globalMaxSal.EmployeePointer.GlobalMaxSalEmployeePointer.GlobalMaxSalEmployeePointer
+			}
+			// exibindo
+			os.Stdout.WriteString(sb.String())
 
-		wg.Done()
-	}()
+			wg.Done()
+		}()
 
-	// glogal_min
-	// global_min|<nome completo>|<salário>
-	go func() {
-		// construindo a string
-		var sb strings.Builder
-		sb.WriteString("\nglobal_min|")
-		sb.WriteString(globalMinSal.EmployeePointer.Nome)
-		sb.WriteString(" ")
-		sb.WriteString(globalMinSal.EmployeePointer.Sobrenome)
-		sb.WriteString("|")
-		sb.WriteString(strconv.FormatFloat(globalMinSal.EmployeePointer.Salario, 'f', 2, 64))
-		globalMinSal.EmployeePointer = globalMinSal.EmployeePointer.GlobalMinSalEmployeePointer
-
-		for globalMinSal.EmployeePointer != nil {
+		// glogal_min
+		// global_min|<nome completo>|<salário>
+		go func() {
+			// construindo a string
+			var sb strings.Builder
 			sb.WriteString("\nglobal_min|")
-			sb.WriteString(globalMinSal.EmployeePointer.Nome)
+			sb.Write(globalMinSal.EmployeePointer.Nome)
 			sb.WriteString(" ")
-			sb.WriteString(globalMinSal.EmployeePointer.Sobrenome)
+			sb.Write(globalMinSal.EmployeePointer.Sobrenome)
 			sb.WriteString("|")
 			sb.WriteString(strconv.FormatFloat(globalMinSal.EmployeePointer.Salario, 'f', 2, 64))
 			globalMinSal.EmployeePointer = globalMinSal.EmployeePointer.GlobalMinSalEmployeePointer
-		}
-		// exibindo
-		os.Stdout.WriteString(sb.String())
 
-		wg.Done()
-	}()
-
-	// least_employe
-	// least_employees|<nome da área>|<número de funcionários>
-	go func() {
-		// calculando
-		for contador := 1; contador < sizeArea; contador++ {
-			if dat.AreasPointer[contador].QTD != 0 {
-				if dat.AreasPointer[contador].QTD == leastArea.QTD {
-					temp := leastArea.AreasPointer
-					for temp.LeastAreaQTD != nil {
-						temp = temp.LeastAreaQTD
-					}
-					temp.LeastAreaQTD = &dat.AreasPointer[contador]
-				}
-				if dat.AreasPointer[contador].QTD < leastArea.QTD {
-					leastArea.QTD = dat.AreasPointer[contador].QTD
-					leastArea.AreasPointer = &dat.AreasPointer[contador]
-				}
+			for globalMinSal.EmployeePointer != nil {
+				sb.WriteString("\nglobal_min|")
+				sb.Write(globalMinSal.EmployeePointer.Nome)
+				sb.WriteString(" ")
+				sb.Write(globalMinSal.EmployeePointer.Sobrenome)
+				sb.WriteString("|")
+				sb.WriteString(strconv.FormatFloat(globalMinSal.EmployeePointer.Salario, 'f', 2, 64))
+				globalMinSal.EmployeePointer = globalMinSal.EmployeePointer.GlobalMinSalEmployeePointer
 			}
+			// exibindo
+			os.Stdout.WriteString(sb.String())
 
-		}
-		// construindo a string
-		var sb strings.Builder
-		sb.WriteString("\nleast_employees|")
-		sb.WriteString(leastArea.AreasPointer.Nome)
-		sb.WriteString("|")
-		sb.WriteString(strconv.Itoa(leastArea.QTD))
-		leastArea.AreasPointer = leastArea.AreasPointer.LeastAreaQTD
-		for leastArea.AreasPointer != nil {
+			wg.Done()
+		}()
+
+		// least_employe
+		// least_employees|<nome da área>|<número de funcionários>
+		go func() {
+			// calculando
+			for contador := 1; contador < sizeArea; contador++ {
+				if dat.AreasPointer[contador].QTD != 0 {
+					if dat.AreasPointer[contador].QTD == leastArea.QTD {
+						temp := leastArea.AreasPointer
+						for temp.LeastAreaQTD != nil {
+							temp = temp.LeastAreaQTD
+						}
+						temp.LeastAreaQTD = &dat.AreasPointer[contador]
+					}
+					if dat.AreasPointer[contador].QTD < leastArea.QTD {
+						leastArea.QTD = dat.AreasPointer[contador].QTD
+						leastArea.AreasPointer = &dat.AreasPointer[contador]
+					}
+				}
+
+			}
+			// construindo a string
+			var sb strings.Builder
 			sb.WriteString("\nleast_employees|")
-			sb.WriteString(dat.AreasPointer[0].Nome)
+			sb.Write(leastArea.AreasPointer.Nome)
 			sb.WriteString("|")
-			sb.WriteString(strconv.Itoa(dat.AreasPointer[0].QTD))
+			sb.WriteString(strconv.Itoa(leastArea.QTD))
 			leastArea.AreasPointer = leastArea.AreasPointer.LeastAreaQTD
-		}
-		// exibindo
-		os.Stdout.WriteString(sb.String())
+			for leastArea.AreasPointer != nil {
+				sb.WriteString("\nleast_employees|")
+				sb.Write(dat.AreasPointer[0].Nome)
+				sb.WriteString("|")
+				sb.WriteString(strconv.Itoa(dat.AreasPointer[0].QTD))
+				leastArea.AreasPointer = leastArea.AreasPointer.LeastAreaQTD
+			}
+			// exibindo
+			os.Stdout.WriteString(sb.String())
 
-		wg.Done()
-	}()
+			wg.Done()
+		}()
 
-	// most_employees
-	// most_employees|<nome da área>|<número de funcionários>
-	go func() {
-		// construindo a string
-		var sb strings.Builder
-		sb.WriteString("\nmost_employees|")
-		sb.WriteString(mostArea.AreasPointer.Nome)
-		sb.WriteString("|")
-		sb.WriteString(strconv.Itoa(mostArea.QTD))
-		mostArea.AreasPointer = mostArea.AreasPointer.MostAreaQTD
-		for mostArea.AreasPointer != nil {
+		// most_employees
+		// most_employees|<nome da área>|<número de funcionários>
+		go func() {
+			// construindo a string
+			var sb strings.Builder
 			sb.WriteString("\nmost_employees|")
-			sb.WriteString(mostArea.AreasPointer.Nome)
+			sb.Write(mostArea.AreasPointer.Nome)
 			sb.WriteString("|")
 			sb.WriteString(strconv.Itoa(mostArea.QTD))
 			mostArea.AreasPointer = mostArea.AreasPointer.MostAreaQTD
-		}
-		// exibindo
-		os.Stdout.WriteString(sb.String())
-
-		wg.Done()
-	}()
-
-	// area_max
-	// area_max|<nome da área>|<nome completo>|<salário máximo>
-	go func() {
-		// construindo 1 string para, com o valor de todas as areas
-		var sb strings.Builder
-		for contador := 0; contador < sizeArea; contador++ {
-			if dat.AreasPointer[contador].QTD != 0 {
-				sb.WriteString("\narea_max|")
-				sb.WriteString(dat.AreasPointer[contador].Nome)
+			for mostArea.AreasPointer != nil {
+				sb.WriteString("\nmost_employees|")
+				sb.Write(mostArea.AreasPointer.Nome)
 				sb.WriteString("|")
-				sb.WriteString(dat.AreasPointer[contador].AreaMaxFuncPointer.Nome)
-				sb.WriteString(" ")
-				sb.WriteString(dat.AreasPointer[contador].AreaMaxFuncPointer.Sobrenome)
-				sb.WriteString("|")
-				sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AreaMaxFuncPointer.Salario, 'f', 2, 64))
-				dat.AreasPointer[contador].AreaMaxFuncPointer = dat.AreasPointer[contador].AreaMaxFuncPointer.AreaMaxSalEmployeePointer
-				for dat.AreasPointer[contador].AreaMaxFuncPointer != nil {
+				sb.WriteString(strconv.Itoa(mostArea.QTD))
+				mostArea.AreasPointer = mostArea.AreasPointer.MostAreaQTD
+			}
+			// exibindo
+			os.Stdout.WriteString(sb.String())
+
+			wg.Done()
+		}()
+
+		// area_max
+		// area_max|<nome da área>|<nome completo>|<salário máximo>
+		go func() {
+			// construindo 1 string para, com o valor de todas as areas
+			var sb strings.Builder
+			for contador := 0; contador < sizeArea; contador++ {
+				if dat.AreasPointer[contador].QTD != 0 {
 					sb.WriteString("\narea_max|")
-					sb.WriteString(dat.AreasPointer[contador].Nome)
+					sb.Write(dat.AreasPointer[contador].Nome)
 					sb.WriteString("|")
-					sb.WriteString(dat.AreasPointer[contador].AreaMaxFuncPointer.Nome)
+					sb.Write(dat.AreasPointer[contador].AreaMaxFuncPointer.Nome)
 					sb.WriteString(" ")
-					sb.WriteString(dat.AreasPointer[contador].AreaMaxFuncPointer.Sobrenome)
+					sb.Write(dat.AreasPointer[contador].AreaMaxFuncPointer.Sobrenome)
 					sb.WriteString("|")
 					sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AreaMaxFuncPointer.Salario, 'f', 2, 64))
 					dat.AreasPointer[contador].AreaMaxFuncPointer = dat.AreasPointer[contador].AreaMaxFuncPointer.AreaMaxSalEmployeePointer
+					for dat.AreasPointer[contador].AreaMaxFuncPointer != nil {
+						sb.WriteString("\narea_max|")
+						sb.Write(dat.AreasPointer[contador].Nome)
+						sb.WriteString("|")
+						sb.Write(dat.AreasPointer[contador].AreaMaxFuncPointer.Nome)
+						sb.WriteString(" ")
+						sb.Write(dat.AreasPointer[contador].AreaMaxFuncPointer.Sobrenome)
+						sb.WriteString("|")
+						sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AreaMaxFuncPointer.Salario, 'f', 2, 64))
+						dat.AreasPointer[contador].AreaMaxFuncPointer = dat.AreasPointer[contador].AreaMaxFuncPointer.AreaMaxSalEmployeePointer
+					}
 				}
 			}
-		}
 
-		// exibindo
-		os.Stdout.WriteString(sb.String())
+			// exibindo
+			os.Stdout.WriteString(sb.String())
 
-		wg.Done()
-	}()
+			wg.Done()
+		}()
 
-	//  area_min
-	//  area_min|<nome da área>|<nome completo>|<salário>
-	go func() {
-		// construindo a string
-		var sb strings.Builder
-		// construindo 1 string para, com o valor de todas as areas
-		for contador := 0; contador < sizeArea; contador++ {
-			if dat.AreasPointer[contador].QTD != 0 {
-				sb.WriteString("\narea_min|")
-				sb.WriteString(dat.AreasPointer[contador].Nome)
-				sb.WriteString("|")
-				sb.WriteString(dat.AreasPointer[contador].AreaMinFuncPointer.Nome)
-				sb.WriteString(" ")
-				sb.WriteString(dat.AreasPointer[contador].AreaMinFuncPointer.Sobrenome)
-				sb.WriteString("|")
-				sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AreaMinFuncPointer.Salario, 'f', 2, 64))
-				dat.AreasPointer[contador].AreaMinFuncPointer = dat.AreasPointer[contador].AreaMinFuncPointer.AreaMinSalEmployeePointer
-				for dat.AreasPointer[contador].AreaMinFuncPointer != nil {
+		//  area_min
+		//  area_min|<nome da área>|<nome completo>|<salário>
+		go func() {
+			// construindo a string
+			var sb strings.Builder
+			// construindo 1 string para, com o valor de todas as areas
+			for contador := 0; contador < sizeArea; contador++ {
+				if dat.AreasPointer[contador].QTD != 0 {
 					sb.WriteString("\narea_min|")
-					sb.WriteString(dat.AreasPointer[contador].Nome)
+					sb.Write(dat.AreasPointer[contador].Nome)
 					sb.WriteString("|")
-					sb.WriteString(dat.AreasPointer[contador].AreaMinFuncPointer.Nome)
+					sb.Write(dat.AreasPointer[contador].AreaMinFuncPointer.Nome)
 					sb.WriteString(" ")
-					sb.WriteString(dat.AreasPointer[contador].AreaMinFuncPointer.Sobrenome)
+					sb.Write(dat.AreasPointer[contador].AreaMinFuncPointer.Sobrenome)
 					sb.WriteString("|")
 					sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AreaMinFuncPointer.Salario, 'f', 2, 64))
 					dat.AreasPointer[contador].AreaMinFuncPointer = dat.AreasPointer[contador].AreaMinFuncPointer.AreaMinSalEmployeePointer
+					for dat.AreasPointer[contador].AreaMinFuncPointer != nil {
+						sb.WriteString("\narea_min|")
+						sb.Write(dat.AreasPointer[contador].Nome)
+						sb.WriteString("|")
+						sb.Write(dat.AreasPointer[contador].AreaMinFuncPointer.Nome)
+						sb.WriteString(" ")
+						sb.Write(dat.AreasPointer[contador].AreaMinFuncPointer.Sobrenome)
+						sb.WriteString("|")
+						sb.WriteString(strconv.FormatFloat(dat.AreasPointer[contador].AreaMinFuncPointer.Salario, 'f', 2, 64))
+						dat.AreasPointer[contador].AreaMinFuncPointer = dat.AreasPointer[contador].AreaMinFuncPointer.AreaMinSalEmployeePointer
+					}
 				}
 			}
-		}
-		// exibindo
-		os.Stdout.WriteString(sb.String())
+			// exibindo
+			os.Stdout.WriteString(sb.String())
 
-		wg.Done()
-	}()
+			wg.Done()
+		}()
 
-	// last_name_max
-	// last_name_max|<sobrenome do funcionário>|<nome completo>|<salário>
-	go func() {
-		// construindo a string
-		var sb strings.Builder
-		for sobreNome, arrayFuncs := range bigSalaryByLastName {
-			for idx := 0; idx < len(arrayFuncs); idx++ {
-				sb.WriteString("\nlast_name_max|")
-				sb.WriteString(sobreNome)
-				sb.WriteString("|")
-				sb.WriteString(arrayFuncs[idx].Nome)
-				sb.WriteString(" ")
-				sb.WriteString(sobreNome)
-				sb.WriteString("|")
-				sb.WriteString(strconv.FormatFloat(arrayFuncs[idx].Salario, 'f', 2, 64))
+		// last_name_max
+		// last_name_max|<sobrenome do funcionário>|<nome completo>|<salário>
+		go func() {
+			// construindo a string
+			var sb strings.Builder
+			for sobreNome, arrayFuncs := range bigSalaryByLastName {
+				for idx := 0; idx < len(arrayFuncs); idx++ {
+					sb.WriteString("\nlast_name_max|")
+					sb.WriteString(sobreNome)
+					sb.WriteString("|")
+					sb.Write(arrayFuncs[idx].Nome)
+					sb.WriteString(" ")
+					sb.WriteString(sobreNome)
+					sb.WriteString("|")
+					sb.WriteString(strconv.FormatFloat(arrayFuncs[idx].Salario, 'f', 2, 64))
+				}
 			}
-		}
-		// exibindo
-		os.Stdout.WriteString(sb.String())
-		wg.Done()
-	}()
+			// exibindo
+			os.Stdout.WriteString(sb.String())
+			wg.Done()
+		}()
 
-	wg.Wait()
+		wg.Wait()
+	*/
 	os.Stdout.WriteString("\n")
 
 }
