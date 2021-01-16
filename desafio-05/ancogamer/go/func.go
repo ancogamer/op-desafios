@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -259,7 +260,7 @@ func parseJSON(data []byte, blocksToUse uint32) *JSON {
 			wg.Add(1)
 			i += uint32(idx)
 			go solution.parseJSONBlock(data[start:i-1], block)
-
+			wg.Done()
 			start = i
 			i += step
 			break
@@ -269,10 +270,10 @@ func parseJSON(data []byte, blocksToUse uint32) *JSON {
 	wg.Add(1)
 
 	go solution.parseJSONBlock(data[start:], block)
-
+	wg.Done()
 	wg.Wait()
 
-	return solution
+	return <-block
 }
 
 //==================================================================================================
@@ -292,7 +293,7 @@ func main() {
 	}
 
 	dat := parseJSON(rawdata, numberOfBlocks)
-
+	time.Sleep(1)
 	var sizeArea int = len(dat.AreasPointer)
 
 	var mediaGlobalSal float64
