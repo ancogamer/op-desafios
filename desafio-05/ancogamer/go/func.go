@@ -2,15 +2,12 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"io/ioutil"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
-	"unsafe"
 )
 
 const (
@@ -146,11 +143,6 @@ func (d *JSON) parseArea(data []byte) {
 	}
 }
 
-// WARNING: DO NOT DO THIS AT HOME.
-func unsafeString(b []byte) string {
-	return *(*string)(unsafe.Pointer(&b))
-}
-
 // parseEmployee parses an employee from the input JSON file. If the received
 // data is not an employee, it calls parseArea instead.
 func (d *JSON) parseEmployee(data []byte, start, end uint32) {
@@ -189,7 +181,7 @@ func (d *JSON) parseEmployee(data []byte, start, end uint32) {
 					break
 				}
 			}
-			salary, err := strconv.ParseFloat(unsafeString(data[previous+2:j+1]), 64)
+			salary, err := strconv.ParseFloat(string((data[previous+2 : j+1])), 64)
 			if err != nil {
 				log.Printf("oops: error converting %q to float: %v\n", data[previous+2:j+1], err)
 			}
@@ -260,7 +252,7 @@ func parseJSON(data []byte, blocksToUse uint32) *JSON {
 			wg.Add(1)
 			i += uint32(idx)
 			go solution.parseJSONBlock(data[start:i-1], block)
-			wg.Done()
+
 			start = i
 			i += step
 			break
@@ -270,7 +262,7 @@ func parseJSON(data []byte, blocksToUse uint32) *JSON {
 	wg.Add(1)
 
 	go solution.parseJSONBlock(data[start:], block)
-	wg.Done()
+
 	wg.Wait()
 
 	return <-block
@@ -284,16 +276,9 @@ func main() {
 	}
 
 	numberOfBlocks := uint32(numberOfBlocksDefault)
-	if len(os.Args) >= 3 {
-		n, err := strconv.ParseUint(flag.Args()[1], 10, 32)
-		if err != nil {
-			log.Fatal(err)
-		}
-		numberOfBlocks = uint32(n)
-	}
 
 	dat := parseJSON(rawdata, numberOfBlocks)
-	time.Sleep(1)
+
 	var sizeArea int = len(dat.AreasPointer)
 
 	var mediaGlobalSal float64
@@ -303,7 +288,6 @@ func main() {
 	bigSalaryByLastName := lastNameSal{}
 
 	mostArea := MostAreaQtd{}
-	leastArea := LeastAreaQtd{}
 
 	var count int
 	for count = 0; count < len(dat.EmployeesPointer); count++ {
@@ -406,8 +390,6 @@ func main() {
 	wg1 := sync.WaitGroup{}
 	wg1.Add(8)
 
-	leastArea.QTD = mostArea.QTD
-
 	// exibindo global_avg
 
 	os.Stdout.WriteString("global_avg|")
@@ -489,6 +471,8 @@ func main() {
 	// least_employe
 	// least_employees|<nome da área>|<número de funcionários>
 	go func() {
+		leastArea := LeastAreaQtd{}
+		leastArea.QTD = mostArea.QTD
 		// calculando
 		for contador := 1; contador < sizeArea; contador++ {
 			if dat.AreasPointer[contador].QTD != 0 {
@@ -508,9 +492,9 @@ func main() {
 		}
 		// construindo a string
 		var sb strings.Builder
-		sb.WriteString("\nleast_employees|")
+		sb.Write([]byte("\nleast_employees|"))
 		sb.Write(leastArea.AreasPointer.Nome)
-		sb.WriteString("|")
+		sb.Write([]byte("|"))
 		sb.WriteString(strconv.Itoa(leastArea.QTD))
 		leastArea.AreasPointer = leastArea.AreasPointer.LeastAreaQTD
 		for leastArea.AreasPointer != nil {
